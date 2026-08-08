@@ -47,6 +47,18 @@ def _touch_activity() -> None:
         _last_activity = time.time()
 
 
+def _log_best_effort(message: str) -> None:
+    """看門狗執行緒要自我了結前的最後訊息：殼（parent）已經死掉時，
+    stdout 這端的 pipe 可能已經斷了，print() 會直接拋 BrokenPipeError，
+    如果沒接住，會讓整個看門狗執行緒在真正呼叫 os._exit(0) 之前就先
+    當掉，反而讓自我了結永遠不會發生——這裡只是想留個 log，絕不能讓
+    它擋到真正要做的事（結束這個 process）。"""
+    try:
+        print(message, flush=True)
+    except OSError:
+        pass
+
+
 def require_token(view):
     """/ocr/pdf 要求呼叫端帶出殼啟動這支服務時給的隨機 token（見
     configs/config.py 說明）；沒設定 token（例如本機手動測試）就不擋，
@@ -147,7 +159,7 @@ def _idle_watchdog() -> None:
         with _activity_lock:
             idle_minutes = (time.time() - _last_activity) / 60
         if idle_minutes >= config.IDLE_TIMEOUT_MINUTES:
-            print(f"[ocr-service] 閒置 {idle_minutes:.1f} 分鐘，自動關閉", flush=True)
+            _log_best_effort(f"[ocr-service] 閒置 {idle_minutes:.1f} 分鐘，自動關閉")
             os._exit(0)
 
 
@@ -160,7 +172,7 @@ def _orphan_watchdog() -> None:
     while True:
         time.sleep(5)
         if os.getppid() != _original_ppid:
-            print("[ocr-service] parent process 已改變，自我結束", flush=True)
+            _log_best_effort("[ocr-service] parent process 已改變，自我結束")
             os._exit(0)
 
 
