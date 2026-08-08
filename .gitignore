@@ -1,7 +1,7 @@
 venv/
 __pycache__/
 *.pyc
-build/*.spec
+build/
 dist/
-*.spec
+/*.spec
 .DS_Store
