@@ -30,9 +30,19 @@ app = Flask(__name__)
 
 # 桌面殼目前載入的是線上的 GitHub Pages 網址（見 desktop_app_plan 記憶），
 # 之後如果改成殼直接內嵌網頁資源，origin 會變成 file://，屆時要再加一條。
+# 本機開發用（任意 port 的 localhost/127.0.0.1）也一併放行，跟
+# zh-cn-to-tw-backend/app.py 的 CORS 設定保持一致——桌面殼測試時常用
+# WEB_BASE_URL_OVERRIDE 指到本機的 http.server，origin 是
+# http://localhost:<port>，不是正式的 GitHub Pages 網址，沒有這幾條
+# 本機測試時打 /ocr/pdf 會被瀏覽器的 CORS 預檢擋下來（實測抓到：
+# "Fetch API cannot load ... due to access control checks"）。
 CORS(
     app,
-    origins=["https://beethoreven.github.io"],
+    origins=[
+        "https://beethoreven.github.io",
+        r"http://localhost:\d+",
+        r"http://127\.0\.0\.1:\d+",
+    ],
     allow_headers=["Content-Type", "X-OCR-Token"],
 )
 
