@@ -24,7 +24,7 @@ from flask_cors import CORS
 
 from configs import config
 from ocr_utils.cover_detect import evaluate_cover_page
-from ocr_utils.ocr_engine import ocr_page
+from ocr_utils.ocr_engine import ocr_page, preload
 from ocr_utils.pdf_to_images import get_pdf_page_count, render_pdf_pages
 
 app = Flask(__name__)
@@ -109,8 +109,15 @@ def require_token(view):
 
 @app.get("/health")
 def health():
-    # 刻意不要求 token、也不更新閒置計時器：殼可能會用這支做輕量存活檢查，
-    # 如果每次健康檢查都算「活動」，閒置自動關閉這個機制就永遠不會觸發。
+    """就緒探測：呼叫端（網頁）在送 PDF 之前用這支確認服務真的可以服務了。
+
+    這一步不能省——殼是從 stdout 讀 port 的，而那一行是在 app.run() 真正
+    開始監聽「之前」就印出來的，所以「拿到 port」不等於「連得上」。中間
+    那個空窗如果直接送 PDF，會撞上連線失敗。
+
+    刻意不要求 token、也不更新閒置計時器：這支只是問「你活著嗎」，如果
+    每次探測都算「活動」，閒置自動關閉那個保險就永遠不會觸發。
+    """
     return jsonify({"status": "ok"})
 
 
@@ -148,6 +155,15 @@ def _run_local_ocr_job(job_id: str, pdf_path: str, dpi: int, detect_cover: bool)
             page_images = itertools.chain(lookahead, page_images)
 
         _update_job(job_id, total_pages=total_pages)
+
+        # 明確先把模型載入完成，並且在載入期間讓 phase 反映真實狀態。
+        # 不這樣做的話，這 25 秒會藏在下面第一次 ocr_page() 裡，前端看到的
+        # 是「第 0/N 頁」停住不動 25 秒，跟當掉沒兩樣——尤其服務現在是用到
+        # 才開的，使用者更容易誤判成「服務沒起來」。
+        _update_job(job_id, phase="loading_model")
+        preload()
+        logs.append("辨識模型載入完成")
+        _update_job(job_id, phase="ocr")
 
         pages: list[str] = []
         for image in page_images:
@@ -198,6 +214,11 @@ def ocr_pdf_start():
     with _jobs_lock:
         _ocr_jobs[job_id] = {
             "status": "running",
+            # 這個 job 目前在做哪一步。status 只分「還在跑/完成/失敗」，但
+            # 「還在跑」底下的幾個階段耗時差很多（模型載入單獨就要 25 秒），
+            # 沒有這個欄位的話前端只能一路顯示「辨識中（第 0/N 頁）」，
+            # 使用者無法分辨是正常在等還是卡死了。
+            "phase": "preparing",
             "current_page": 0,
             "total_pages": None,
             "pages": None,
