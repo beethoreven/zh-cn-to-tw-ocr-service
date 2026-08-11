@@ -28,12 +28,12 @@ IDLE_TIMEOUT_MINUTES = float(os.environ.get("OCR_SERVICE_IDLE_TIMEOUT_MINUTES", 
 # 機器上，多執行緒平行運算是純粹的效能加分，沒有那個限制的理由。
 OCR_CPU_THREADS = int(os.environ.get("OCR_CPU_THREADS", str(min(4, os.cpu_count() or 1))))
 
-# 跟 zh-cn-to-tw-backend/ocr_utils/ocr_engine.py 保持一致：PP-OCRv3 是已經
-# 驗證過穩定可用的版本，PP-OCRv4 曾經在 Render 上因為特定主機的 CPU
-# 缺某個向量化指令直接 SIGILL 崩潰——雖然那是 Render 那台機器的問題，
-# 但目前還沒有在使用者自己的機器上驗證過 PP-OCRv4，先沿用已知安全的版本，
-# 之後有餘裕再個別驗證要不要換更新版本。
-OCR_VERSION = os.environ.get("OCR_VERSION", "PP-OCRv3")
+# PP-OCRv4 曾經在 Render 上因為那台機器的 CPU 缺某個向量化指令直接
+# SIGILL 崩潰，當時保守改用 PP-OCRv3。但那是 Render 那台特定機器的
+# 問題，跟 model 版本本身沒有關係——現在 OCR 已經整個搬到使用者自己的
+# 本機執行（不再碰 Render），原本那個崩潰的前提已經不存在，2026-08-10
+# 在本機實測過 PP-OCRv4 可以正常初始化、跑出正確辨識結果，改回來。
+OCR_VERSION = os.environ.get("OCR_VERSION", "PP-OCRv4")
 
 PDF_RENDER_DPI = int(os.environ.get("PDF_RENDER_DPI", "200"))
 
