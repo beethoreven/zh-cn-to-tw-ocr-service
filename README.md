@@ -82,8 +82,6 @@ CORS 放行清單裡有一條 `"null"`——桌面殼用 `file://` 載入頁面�
 ### 已知限制
 
 - Windows 版的對應服務尚未開始（`zh-cn-to-tw-windows`，規劃中）。
-- 這個 repo 目前沒有推上 GitHub（無 remote），也不是頂層 meta-repo 的
-  git submodule，只在本機維護。
 
 ---
 
@@ -271,8 +269,6 @@ Access-Control-Allow-Origin`).
 
 - The Windows counterpart service hasn't been started yet
   (`zh-cn-to-tw-windows`, planned).
-- This repo isn't pushed to GitHub yet (no remote), and isn't a git
-  submodule of the top-level meta-repo — maintained locally only.
 
 ---
 
