@@ -127,13 +127,26 @@ def _run_local_ocr_job(job_id: str, pdf_path: str, dpi: int, detect_cover: bool)
     zh-cn-to-tw-backend/pipeline/orchestrator.py 的 run_ocr_stage 對應。"""
     try:
         logs: list[str] = []
+
+        def log(message: str) -> None:
+            # 每寫一行就立刻更新進 job 狀態（不是全部做完才一次性塞給
+            # _update_job），前端輪詢 /ocr/pdf/status/<job_id> 才看得到
+            # 逐行累積的效果——封面偵測這種很早、很快就結束的步驟，如果
+            # log 只在整個 job 做完（status=done）那一刻才一次出現，
+            # 使用者在處理過程中完全看不到這則訊息，容易誤以為沒處理
+            # 到（實測反映過這個情況）。傳整份 list 的複本（不是原本那個
+            # 參照）進去，避免呼叫端拿到的 list 物件之後又被這裡繼續
+            # append 而被意外看到還沒定案的中間狀態。
+            logs.append(message)
+            _update_job(job_id, logs=list(logs))
+
         total_pages = get_pdf_page_count(pdf_path)
         page_images = render_pdf_pages(pdf_path, dpi=dpi)
 
         if not detect_cover:
-            logs.append("「偵測首頁是否為封面」已關閉，略過封面偵測")
+            log("「偵測首頁是否為封面」已關閉，略過封面偵測")
         elif total_pages < 2:
-            logs.append(f"PDF 只有 {total_pages} 頁，略過封面偵測")
+            log(f"PDF 只有 {total_pages} 頁，略過封面偵測")
         else:
             lookahead = []
             try:
@@ -146,12 +159,30 @@ def _run_local_ocr_job(job_id: str, pdf_path: str, dpi: int, detect_cover: bool)
                     config.COVER_DETECT_SATURATION_THRESHOLD,
                     config.COVER_DETECT_RELATIVE_MARGIN,
                 )
+                # 跟 zh-cn-to-tw-backend/pipeline/orchestrator.py 的
+                # 對應段落用同一套詳細格式（不管判定結果如何都記下算出
+                # 來的數值），不是只給一個「排除了/沒排除」的黑盒結論——
+                # 兩邊本來就是同一個 evaluate_cover_page，log 的詳細程度
+                # 沒理由不一致。
+                log(
+                    f"封面偵測：首頁墨水覆蓋率={result.dark_ratio:.2f}、"
+                    f"飽和度={result.saturation:.1f}"
+                    f"（門檻分別為 {config.COVER_DETECT_DARK_RATIO_THRESHOLD}、"
+                    f"{config.COVER_DETECT_SATURATION_THRESHOLD}）；"
+                    f"參考頁（第 2 頁）墨水覆蓋率={result.reference_dark_ratio:.2f}、"
+                    f"飽和度={result.reference_saturation:.1f}"
+                    f"（相對倍數門檻 {config.COVER_DETECT_RELATIVE_MARGIN}）"
+                    f" → 判定{'為封面' if result.is_cover else '不是封面'}"
+                )
                 if result.is_cover:
                     lookahead = lookahead[1:]
                     total_pages -= 1
-                    logs.append("首頁判定為封面，已自動移除，不列入 OCR 範圍")
+                    log(
+                        "首頁已自動移除，不列入 OCR 範圍；"
+                        "如果判斷錯誤，請關閉「偵測首頁是否為封面」開關重新處理"
+                    )
             except Exception as exc:  # noqa: BLE001
-                logs.append(f"封面偵測發生錯誤：{exc}，跳過偵測，正常處理全部頁面")
+                log(f"封面偵測發生錯誤：{exc}，跳過偵測，正常處理全部頁面")
             page_images = itertools.chain(lookahead, page_images)
 
         _update_job(job_id, total_pages=total_pages)
@@ -162,7 +193,7 @@ def _run_local_ocr_job(job_id: str, pdf_path: str, dpi: int, detect_cover: bool)
         # 才開的，使用者更容易誤判成「服務沒起來」。
         _update_job(job_id, phase="loading_model")
         preload()
-        logs.append("辨識模型載入完成")
+        log("辨識模型載入完成")
         _update_job(job_id, phase="ocr")
 
         pages: list[str] = []
@@ -170,7 +201,7 @@ def _run_local_ocr_job(job_id: str, pdf_path: str, dpi: int, detect_cover: bool)
             pages.append(ocr_page(image))
             _update_job(job_id, current_page=len(pages))
 
-        _update_job(job_id, status="done", pages=pages, logs=logs, finished_at=time.time())
+        _update_job(job_id, status="done", pages=pages, finished_at=time.time())
     except Exception as exc:  # noqa: BLE001
         _update_job(
             job_id,
