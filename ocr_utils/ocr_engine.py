@@ -1,16 +1,30 @@
-"""PaddleOCR 包裝層——跟 zh-cn-to-tw-backend/ocr_utils/ocr_engine.py 邏輯相同
-（模型只在第一次呼叫時載入、用 lock 序列化辨識呼叫、依文字框座標排序回傳
-閱讀順序），差別只在 CPU 執行緒數與 model 版本這兩個設定值改由
-configs/config.py 提供，數值本身在桌面情境下比 Render 那份寬鬆（見該檔
-說明）。
+"""OCR 包裝層——底層引擎是 RapidOCR（ONNXRuntime），模型只在第一次呼叫時
+載入、用 lock 序列化辨識呼叫、依文字框座標排序回傳閱讀順序。
+
+2026-08-17 從 paddleocr（paddlepaddle 原生推論引擎）換成 rapidocr_onnxruntime：
+paddlepaddle 的官方 pip wheel 假設 CPU 有 AVX/AVX2，實測在一台 Intel
+Pentium Gold G5400（2018 年桌機晶片，py-cpuinfo 確認沒有 avx/avx2/fma）上，
+`import paddle` 直接讓整個 process 崩潰（Windows「動態連結程式庫 (DLL)
+初始化例行程序失敗」，連 Python try/except 都攔不住，是記憶體層級的
+崩潰）。這不是單一台機器的特例——configs/config.py 裡舊註解就記錄過同一
+類崩潰（SIGILL）曾經在 Render 的雲端主機上發生過，當時判斷是「那台主機
+特定的問題，OCR 搬到使用者本機後不會再遇到」；這次證明是判斷錯了，這個
+問題只要使用者自己的機器 CPU 缺 AVX2 就會重演，跟雲端還是本機無關——而
+入門/預算款 CPU（例如這次踩到的 Pentium Gold）即使是近幾年出的，也常見
+被廠商刻意閹割掉 AVX2。
+
+RapidOCR 用的還是同一個 ch_PP-OCRv4 模型（det/cls/rec 三個 .onnx 檔，就是
+PP-OCRv4 轉存成 ONNX 格式），辨識品質理論上跟原本 paddleocr 一致，差別
+只在推論引擎換成 ONNXRuntime——這套引擎本身就以廣泛的硬體/OS 相容性
+著稱，同一台無 AVX2 的機器上實測跑起來完全正常、辨識結果正確（繁簡體
+文字都認得出來，信心分數 >0.96），不會出現原本那種載入階段直接崩潰的
+問題。
 """
 
-import os
 import threading
 
+import numpy as np
 from PIL import Image
-
-from configs import config
 
 _ocr = None
 _ocr_lock = threading.Lock()
@@ -19,11 +33,11 @@ _ocr_lock = threading.Lock()
 def preload() -> None:
     """先把辨識模型載入完成。
 
-    這一步實測要 25 秒左右（而且會把記憶體從 26 MB 拉到 393 MB），是整個
-    流程裡最久的單一動作。不呼叫這支也不會壞——模型本來就會在第一次
-    ocr_page() 時自動載入——但那樣這 25 秒會「藏」在第一頁的辨識裡，
-    對呼叫端來說就是進度停在第 0 頁不動 25 秒，看起來跟當掉一模一樣。
-    拉出來變成一個明確的步驟，呼叫端才能誠實告訴使用者現在在等什麼。
+    不呼叫這支也不會壞——模型本來就會在第一次 ocr_page() 時自動載入——
+    但那樣這段時間會「藏」在第一頁的辨識裡，對呼叫端來說就是進度停在
+    第 0 頁不動一段時間，看起來跟當掉一模一樣。拉出來變成一個明確的
+    步驟，呼叫端才能誠實告訴使用者現在在等什麼（見 app.py 的
+    phase：preparing -> loading_model -> ocr）。
     """
     _get_ocr()
 
@@ -31,22 +45,9 @@ def preload() -> None:
 def _get_ocr():
     global _ocr
     if _ocr is None:
-        # 這幾個環境變數要在 paddle 的原生函式庫真正被載入之前設好
-        # （底層 OpenMP/MKL/OpenBLAS 是在函式庫初始化時讀取這些值，
-        # 不是每次呼叫才讀），所以放在 import paddleocr 之前設定。
-        os.environ.setdefault("OMP_NUM_THREADS", str(config.OCR_CPU_THREADS))
-        os.environ.setdefault("MKL_NUM_THREADS", str(config.OCR_CPU_THREADS))
-        os.environ.setdefault("OPENBLAS_NUM_THREADS", str(config.OCR_CPU_THREADS))
+        from rapidocr_onnxruntime import RapidOCR
 
-        from paddleocr import PaddleOCR
-
-        _ocr = PaddleOCR(
-            use_angle_cls=True,
-            lang="ch",
-            show_log=False,
-            cpu_threads=config.OCR_CPU_THREADS,
-            ocr_version=config.OCR_VERSION,
-        )
+        _ocr = RapidOCR()
     return _ocr
 
 
@@ -59,16 +60,16 @@ def _line_key(item):
 
 def ocr_page(image: Image.Image) -> str:
     """辨識單一頁面圖片，回傳依閱讀順序組合的文字（保留原始簡體，尚未轉繁）。"""
-    import numpy as np
-
     ocr = _get_ocr()
     with _ocr_lock:
-        result = ocr.ocr(np.array(image), cls=True)
+        result, _elapse = ocr(np.array(image))
 
-    if not result or not result[0]:
+    if not result:
         return ""
 
-    lines = result[0]
-    lines_sorted = sorted(lines, key=_line_key)
-    texts = [line[1][0] for line in lines_sorted]
+    # RapidOCR 回傳格式是 [box, text, score] 的扁平三元素列表（跟舊版
+    # paddleocr 的 [box, [text, score]] 巢狀格式不同），排序邏輯不變，
+    # 只有取文字的索引從 line[1][0] 改成 line[1]。
+    lines_sorted = sorted(result, key=_line_key)
+    texts = [line[1] for line in lines_sorted]
     return "\n".join(texts)

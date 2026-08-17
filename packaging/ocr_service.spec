@@ -1,34 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
-# 打包 zh-cn-to-tw-ocr-service 成獨立執行檔。三個修正對應
-# PaddlePaddle/paddleocr 在 PyInstaller 凍結環境下的已知相容性問題，
-# 詳細原因見 README.md「打包成獨立執行檔」一節：
-#   1. runtime hook（rthook_paddle_libpath.py）修正 paddle 自己的
-#      set_paddle_lib_path() 在凍結環境下找不到 paddle/libs 的問題。
-#   2. --collect-data Cython：paddle.utils.cpp_extension 需要的樣板檔案。
-#   3. Tree() 複製整個 paddleocr 原始碼 + 明確列出的 hiddenimports +
-#      copy_metadata：paddleocr 用檔案路徑 + sys.path trick 動態載入
-#      自己的子模組，PyInstaller 的靜態分析完全看不到這些依賴。
-from PyInstaller.utils.hooks import collect_data_files, copy_metadata
-
-paddleocr_hidden_imports = [
-    "requests", "shapely", "scipy", "skimage", "lmdb", "pyclipper", "six",
-    "yaml", "tqdm", "rapidfuzz", "imgaug", "albumentations", "apted",
-    "bs4", "docx", "editdistance", "tablepyxl", "qtpy", "cv2",
-]
-
-metadata_packages = [
-    "imageio", "imgaug", "scikit-image", "shapely", "Pillow", "opencv-python",
-    "paddleocr", "paddlepaddle", "pyclipper", "lmdb", "rapidfuzz", "requests",
-    "tqdm", "six", "PyYAML", "numpy", "Flask", "Flask-Cors",
-]
-metadata_datas = []
-for pkg in metadata_packages:
-    try:
-        metadata_datas += copy_metadata(pkg)
-    except Exception:
-        pass
-
+# 打包 zh-cn-to-tw-ocr-service 成獨立執行檔。
+#
+# 2026-08-17 從 paddleocr 換成 rapidocr_onnxruntime 之後，這份 spec 大幅
+# 簡化——不再需要 paddle 專屬的三個相容性 hack（runtime hook 修正
+# set_paddle_lib_path()、collect-data Cython、Tree() 複製 paddleocr 原始碼，
+# 見 git 歷史裡舊版這個檔案的完整說明）。rapidocr_onnxruntime 是純
+# Python + 資料檔（config.yaml、models/*.onnx）的套件，用
+# collect_data_files() 把這些資料檔收進來就夠了。
 import os
+
+from PyInstaller.utils.hooks import collect_data_files
 
 # SPECPATH 是 PyInstaller 注入 spec 檔執行環境的內建變數（這個 .spec
 # 檔自己所在的絕對路徑），不要假設呼叫端的目前工作目錄，避免從不同地方
@@ -39,21 +20,14 @@ a = Analysis(
     [os.path.join(repo_root, "app.py")],
     pathex=[repo_root],
     binaries=[],
-    datas=collect_data_files('Cython') + metadata_datas,
-    hiddenimports=paddleocr_hidden_imports,
+    datas=collect_data_files("rapidocr_onnxruntime"),
+    hiddenimports=[],
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[os.path.join(SPECPATH, "rthook_paddle_libpath.py")],
+    runtime_hooks=[],
     excludes=[],
     noarchive=False,
 )
-
-# PADDLEOCR_SITE_PACKAGES 由 build 指令的環境變數帶入（跑 pyinstaller 的
-# venv 的 site-packages 路徑），避免這個 .spec 檔寫死某一台機器的路徑。
-paddleocr_src = os.path.join(
-    os.environ["PADDLEOCR_SITE_PACKAGES"], "paddleocr"
-)
-a.datas += Tree(paddleocr_src, prefix="paddleocr")
 
 pyz = PYZ(a.pure, a.zipped_data)
 

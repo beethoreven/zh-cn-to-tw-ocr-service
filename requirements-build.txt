@@ -6,9 +6,3 @@
 #   pip install -r requirements.txt -r requirements-build.txt
 #   （完整的重建步驟見 README.md「打包成獨立執行檔」一節）
 pyinstaller==6.22.0
-
-# paddle.utils.cpp_extension（OCR 推論本身用不到，但 paddle 套件初始化
-# 時就會 import 到）需要 Cython 的 Utility/*.cpp 樣板檔案，PyInstaller
-# 靠 --collect-data Cython 把它們收進打包結果——這代表打包當下的環境
-# 必須裝有 Cython 本體（不只是拿到那幾個檔案），見 README.md 的說明。
-Cython==3.2.9

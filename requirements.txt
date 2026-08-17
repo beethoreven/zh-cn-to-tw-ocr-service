@@ -1,6 +1,5 @@
 Flask==3.0.3
 Flask-Cors==5.0.0
 PyMuPDF==1.24.11
-paddlepaddle==2.6.2
-paddleocr==2.9.1
+rapidocr_onnxruntime==1.4.4
 Pillow==10.4.0

@@ -18,22 +18,9 @@ OCR_SERVICE_TOKEN = os.environ.get("OCR_SERVICE_TOKEN", "")
 PORT = int(os.environ.get("OCR_SERVICE_PORT", "0"))
 
 # 閒置這麼多分鐘沒有任何 /ocr/pdf 請求就自動關閉，避免無限期占用
-# PaddleOCR 模型常駐的記憶體（實測第一次推論就會吃到 2.6-2.8GB）。
-# 殼本身的健康監控/自動重啟邏輯會在下次真的需要時無感重新拉起這支服務，
-# 使用者不需要重開整個 App。
+# OCR 模型常駐的記憶體。殼本身的健康監控/自動重啟邏輯會在下次真的需要時
+# 無感重新拉起這支服務，使用者不需要重開整個 App。
 IDLE_TIMEOUT_MINUTES = float(os.environ.get("OCR_SERVICE_IDLE_TIMEOUT_MINUTES", "30"))
-
-# CPU 執行緒數：跟 zh-cn-to-tw-backend 那邊刻意鎖 1 完全相反——那邊是為了
-# 閃避 Render 免費方案 0.1 顆 CPU 配額被榨乾的問題，這裡跑在使用者自己的
-# 機器上，多執行緒平行運算是純粹的效能加分，沒有那個限制的理由。
-OCR_CPU_THREADS = int(os.environ.get("OCR_CPU_THREADS", str(min(4, os.cpu_count() or 1))))
-
-# PP-OCRv4 曾經在 Render 上因為那台機器的 CPU 缺某個向量化指令直接
-# SIGILL 崩潰，當時保守改用 PP-OCRv3。但那是 Render 那台特定機器的
-# 問題，跟 model 版本本身沒有關係——現在 OCR 已經整個搬到使用者自己的
-# 本機執行（不再碰 Render），原本那個崩潰的前提已經不存在，2026-08-10
-# 在本機實測過 PP-OCRv4 可以正常初始化、跑出正確辨識結果，改回來。
-OCR_VERSION = os.environ.get("OCR_VERSION", "PP-OCRv4")
 
 PDF_RENDER_DPI = int(os.environ.get("PDF_RENDER_DPI", "200"))
 

@@ -43,9 +43,23 @@ PaddleOCR 的模型不是 process 啟動時就載入，是第一次真的呼叫�
 
 CORS 放行清單裡有一條 `"null"`——桌面殼用 `file://` 載入頁面後，瀏覽器對跨來源請求送出的 `Origin` header 字面上就是 `"null"`，不放行的話桌面版打這支服務的每個請求都會被瀏覽器 CORS 擋下來（實測撞過：`Origin null is not allowed by Access-Control-Allow-Origin`）。
 
+### 為什麼從 paddleocr 換成 rapidocr_onnxruntime
+
+2026-08-17：Windows 版開發初期，在一台真實的使用者機器（Intel Pentium Gold G5400，2018 年桌機晶片）上實測 `import paddle` 直接讓整個 process 崩潰——Windows 回報「動態連結程式庫 (DLL) 初始化例行程序失敗」，連 Python 的 `try/except` 都攔不住，是記憶體層級的崩潰，不是乾淨的例外。用 `py-cpuinfo` 直接查這顆 CPU 的指令集，確認沒有 `avx`/`avx2`/`fma`——paddlepaddle 官方 PyPI 上的 pip wheel 是假設 CPU 有 AVX2 才編譯的，沒有的話不是變慢，是直接跑不起來。
+
+這不是單一台機器的特例，也不是新發現的問題——上面「為什麼需要這支服務」那段提到的、曾經在 Render 主機上遇過的 SIGILL 崩潰，就是同一類問題的前一次現身；當時的結論是「那是 Render 那台主機特定的問題，OCR 搬到使用者本機執行後就不會再遇到」，這次證明那個結論下錯了——問題不是「雲端 vs 本機」，是「這顆 CPU 有沒有 AVX2」，任何使用者自己的機器只要 CPU 沒有 AVX2 都會踩到，而 Pentium/Celeron 這類入門款 CPU，即使是近幾年出的，也常見被廠商刻意閹割掉 AVX2（這台 G5400 不是老古董，是 2018 年的桌機晶片）。
+
+換成 `rapidocr_onnxruntime`（ONNXRuntime 為底的推論引擎）解決了這個問題，而且是同一組模型：RapidOCR 內建的就是 `ch_PP-OCRv4_det/rec_infer.onnx`——PP-OCRv4 本人轉存成 ONNX 格式，辨識品質理論上不變。在同一台無 AVX2 的機器上實測：`RapidOCR()` 初始化 0.4 秒、單頁推論約 5 秒，簡體、繁體文字都正確辨識出來，信心分數全部 >0.96，完全沒有 paddlepaddle 那種載入階段崩潰的問題。ONNXRuntime 本身在 ML 推論引擎裡就是以廣泛硬體/OS 相容性著稱，這次的實測結果符合這個名聲。
+
+這是共用 repo（`zh-cn-to-tw-mac` 跟 `zh-cn-to-tw-windows` 都用同一份原始碼各自 PyInstaller 打包），這個決策同時影響兩個平台；Mac 版沒有實測撞過這個崩潰（Mac 上的 Intel/Apple Silicon CPU 目前用到的機型都有 AVX2 或本來就不受這個限制），但為了兩邊共用同一套邏輯、不要維護兩份 OCR 引擎，兩邊一起換。
+
+### Windows 上的孤兒行程看門狗不可靠
+
+上面「服務生命週期」那段的孤兒行程看門狗（輪詢 `os.getppid()` 有沒有變）在 Windows 上基本上失效：POSIX 系統（macOS/Linux）parent process 死掉後，子行程會被系統重新掛到別的 parent（通常是 init/launchd），`getppid()` 讀到的值真的會變；Windows 不會重新掛接子行程的 parent pid——那個值是建立當下就固定住的，parent 死了也不會變，除非剛好有新 process 巧合搶到同一個 pid。`zh-cn-to-tw-windows` 那邊改用 Windows 原生的 Job Object（`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`）當作對應的保險機制，殼死掉時系統核心會直接連坐砍掉這個子行程，不依賴這裡的輪詢邏輯——細節見 `zh-cn-to-tw-windows` 的 `ProcessJobObject.cs`。這個看門狗本身留著沒拿掉：Mac 版還是用它，拿掉對 Windows 沒有壞處也沒有好處（Job Object 已經是更可靠的保險），拿掉反而讓 Mac 版少一層保護。
+
 ### 已知限制
 
-- Windows 版的對應服務尚未開始（`zh-cn-to-tw-windows`，規劃中）。
+- Windows 版對應服務已經接上（`zh-cn-to-tw-windows`），細節見上面兩節。
 
 ---
 
@@ -53,11 +67,22 @@ CORS 放行清單裡有一條 `"null"`——桌面殼用 `file://` 載入頁面�
 
 ## 本機開發
 
+macOS：
+
 ```bash
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 python3 app.py
+```
+
+Windows：
+
+```powershell
+python -m venv venv
+venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+python app.py
 ```
 
 啟動後會在 stdout 印出 `OCR_SERVICE_PORT=<port>`——沒有帶 `OCR_SERVICE_PORT` 環境變數時，會讓作業系統配一個空 port，不寫死固定 port（這個專案本機測試階段吃過很多次「port 被舊 process 卡住」的虧）。
@@ -73,22 +98,27 @@ curl http://127.0.0.1:<port>/ocr/pdf/status/<job_id>
 
 **打包用的環境要是這個 repo 自己的 `venv/`，不要借用專案外、跟這個 repo 無關的暫存目錄。** 之前一度直接沿用另一個實驗（DPI 耗時測試）臨時建立、放在系統暫存路徑下的 venv，那個目錄不屬於任何 repo、隨時可能被系統清掉，會導致「換一台機器、甚至只是隔了一段時間」就沒辦法重新打包出結果，完全不符合長期維護的需求。正確做法是照下面步驟在這個 repo 底下建一個永久的 `venv/`（已被 `.gitignore` 排除，不進版控，但目錄本身留在磁碟上，不依賴任何跟這個 repo 無關的路徑）。
 
-PaddlePaddle/paddleocr 在 PyInstaller 凍結環境下有三個已知、已驗證修復的相容性問題，三個修復都已經寫進 `packaging/ocr_service.spec`（不是靠一長串 CLI 參數手動組出來，用 `.spec` 檔才能表達第 3 點需要的 `Tree()` 複製，純 CLI 做不到）：
+換成 `rapidocr_onnxruntime` 之後（見「為什麼從 paddleocr 換成 rapidocr_onnxruntime」），打包大幅簡化：不再需要 paddle 專屬的三個相容性 hack（原本的 runtime hook、`collect_data_files("Cython")`、`Tree()` 複製 paddleocr 原始碼，完整原因見 git 歷史裡舊版這份 README 跟 `packaging/ocr_service.spec` 的說明）。`pyinstaller` 的 `pyinstaller-hooks-contrib` 依賴已經內建 onnxruntime/opencv/lxml 等套件的打包規則，`.spec` 檔只需要 `collect_data_files("rapidocr_onnxruntime")` 把套件內建的 `config.yaml`、`models/*.onnx` 收進來就夠了，不需要任何自訂 runtime hook。
 
-1. `paddle/base/core.py` 的 `set_paddle_lib_path()` 靠 `site.getsitepackages()` 找 `paddle/libs`，凍結環境沒有真正的 site-packages 目錄，會 fallback 到 `site.USER_SITE`（凍結環境下是 `None`），直接 `TypeError` 崩潰在還沒真正開始執行任何程式碼之前。用 `packaging/rthook_paddle_libpath.py` 這個 PyInstaller runtime hook 把 `site.getsitepackages()` patch 成回報凍結後 `paddle/libs` 實際所在的位置解決。
-2. `paddle.utils.cpp_extension`（OCR 推論用不到、但 paddle 套件初始化時就會 import 到）依賴 Cython 編譯器，Cython 的 `Utility/*.cpp` 樣板檔案預設不會被 PyInstaller 當成資料檔收進去，缺檔會在 import 階段就丟 `FileNotFoundError`。`.spec` 檔用 `collect_data_files("Cython")` 解決——**打包當下的 venv 必須裝有 Cython 本體**（見 `requirements-build.txt`），不只是需要它產出的那幾個檔案。
-3. `paddleocr` 套件本身用 `sys.path.append` + 動態 import 載入自己的子模組（`ppocr`/`ppstructure`/`tools`），PyInstaller 的靜態分析完全看不到這些依賴。`.spec` 檔用 `Tree()` 把整個 `paddleocr` 原始碼目錄當純資料檔複製進去解決，這一步需要知道打包當下 venv 的 site-packages 實際路徑在哪，透過環境變數 `PADDLEOCR_SITE_PACKAGES` 帶入（見下方指令），刻意不寫死在 `.spec` 檔裡，才能在不同機器上重建都不用改程式碼。
+macOS：
 
 ```bash
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt -r requirements-build.txt
-
-export PADDLEOCR_SITE_PACKAGES="$(pwd)/venv/lib/python3.9/site-packages"
 pyinstaller packaging/ocr_service.spec --noconfirm
 ```
 
-打包結果在 `dist/zh-cn-to-tw-ocr-service/`，是完全自足的目錄（含 `_internal/`，約 850MB）——**執行期完全不需要 Python、不需要任何 venv**，這是 PyInstaller onedir 打包的重點，凍結執行檔可以在沒有裝 Python 的機器上直接跑。上面這個 venv 只在「重新產生這份打包結果」時才需要，跟最終使用者拿到的東西（.app 裡的內容）無關。
+Windows：
+
+```powershell
+python -m venv venv
+venv\Scripts\Activate.ps1
+pip install -r requirements.txt -r requirements-build.txt
+pyinstaller packaging\ocr_service.spec --noconfirm
+```
+
+打包結果在 `dist/zh-cn-to-tw-ocr-service/`，是完全自足的目錄——**執行期完全不需要 Python、不需要任何 venv**，這是 PyInstaller onedir 打包的重點，凍結執行檔可以在沒有裝 Python 的機器上直接跑。上面這個 venv 只在「重新產生這份打包結果」時才需要，跟最終使用者拿到的東西（.app/.exe 裡的內容）無關。實測 Windows 打包結果約 278MB，比舊版 paddleocr 打包（約 850MB）小非常多——這不只是 Win7 決策帶來的效果（見 `zh-cn-to-tw-windows` README），主要就是 onnxruntime 本身遠比 paddlepaddle 精簡。
 
 ## 環境變數
 
@@ -143,9 +173,23 @@ This service doesn't decide its own start/stop timing at all — that's entirely
 
 The CORS allowlist includes a literal `"null"` entry — once the desktop shell loads its page via `file://`, the browser's `Origin` header on cross-origin requests is the literal string `"null"`; without allowing it, every desktop-mode call to this service gets blocked by CORS (confirmed by reproduction: `Origin null is not allowed by Access-Control-Allow-Origin`).
 
+### Why paddleocr Was Replaced With rapidocr_onnxruntime
+
+2026-08-17: early in Windows development, `import paddle` crashed the entire process on a real user-grade machine (an Intel Pentium Gold G5400, a 2018 desktop chip) — Windows reported "the dynamic-link library (DLL) initialization routine failed," a crash even Python's own `try/except` couldn't catch, since it's a memory-level fault, not a clean exception. Checking that CPU's instruction set directly with `py-cpuinfo` confirmed it has no `avx`/`avx2`/`fma` — the official paddlepaddle wheel on PyPI is compiled assuming AVX2 is present; without it, the library doesn't just run slower, it doesn't run at all.
+
+This isn't a one-machine fluke, and it isn't even a new problem — the SIGILL crash mentioned above under "Why This Service Exists," once seen on a Render host, was the same class of failure showing up earlier; the conclusion drawn at the time was "that was specific to that one Render host, and moving OCR to the user's own machine means it won't happen again." This session proved that conclusion wrong: the real variable isn't "cloud vs. local," it's "does this CPU have AVX2" — any user's own machine can hit this if its CPU lacks it, and budget-tier chips (Pentium/Celeron) commonly have AVX2 deliberately disabled by the vendor even on relatively recent silicon (the G5400 here isn't an antique — it's a 2018 desktop chip).
+
+Switching to `rapidocr_onnxruntime` (an ONNXRuntime-backed inference engine) fixed this, using the same underlying model: RapidOCR ships `ch_PP-OCRv4_det/rec_infer.onnx` — literally PP-OCRv4 itself, exported to ONNX format — so recognition quality should be unchanged in principle. Tested on the exact same non-AVX2 machine: `RapidOCR()` initializes in 0.4s, single-page inference takes about 5s, both Simplified and Traditional Chinese text recognized correctly with confidence scores all above 0.96, with none of paddlepaddle's load-time crash. ONNXRuntime is known industry-wide for broad hardware/OS compatibility as an inference engine, and this result matches that reputation.
+
+Since this is a shared repo (`zh-cn-to-tw-mac` and `zh-cn-to-tw-windows` each PyInstaller-package the exact same source), this decision affects both platforms at once. The Mac build never actually reproduced this crash (the Intel/Apple Silicon chips currently in use on Mac either have AVX2 or aren't subject to this limitation at all), but both platforms switched together anyway, to keep a single shared OCR-engine codepath instead of maintaining two.
+
+### The Orphan-Process Watchdog Is Unreliable on Windows
+
+The orphan-process watchdog mentioned above under "Service Lifecycle" (polling whether `os.getppid()` has changed) is effectively broken on Windows: on POSIX systems (macOS/Linux), once a parent process dies, the child gets reparented to something else by the OS (typically init/launchd), so `getppid()`'s return value genuinely changes and the polling loop catches it. Windows does not reparent a child's tracked parent PID — that value is fixed at process-creation time and stays the same even after the parent dies, unless some unrelated new process happens to reuse that exact PID. `zh-cn-to-tw-windows` uses the native Windows equivalent instead — a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` — so the OS kernel itself kills this subprocess the moment the shell process dies, with no dependence on polling; see `ProcessJobObject.cs` in that repo for details. This watchdog itself wasn't removed: the Mac build still relies on it, and removing it would cost the Mac build a safety net for zero benefit on the Windows side (which already has the more reliable Job Object guarantee).
+
 ### Known Limitations
 
-- The Windows counterpart service hasn't been started yet (`zh-cn-to-tw-windows`, planned).
+- The Windows counterpart service is now wired up (`zh-cn-to-tw-windows`); see the two sections above for details.
 
 ---
 
@@ -153,11 +197,22 @@ The CORS allowlist includes a literal `"null"` entry — once the desktop shell 
 
 ## Local Development
 
+macOS:
+
 ```bash
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 python3 app.py
+```
+
+Windows:
+
+```powershell
+python -m venv venv
+venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+python app.py
 ```
 
 On startup it prints `OCR_SERVICE_PORT=<port>` to stdout — without an `OCR_SERVICE_PORT` environment variable set, the OS assigns a free port; a fixed port is never hardcoded (this project got burned repeatedly during local testing by a stale process squatting a fixed port).
@@ -173,22 +228,27 @@ curl http://127.0.0.1:<port>/ocr/pdf/status/<job_id>
 
 **The build environment must be this repo's own `venv/` — never borrow a scratch directory unrelated to this repo.** This project once reused a venv that had been temporarily created for an unrelated experiment (a DPI timing test) and lived under a system temp path; that directory belonged to no repo and could vanish at any time, meaning "switch machines, or even just wait a while" was enough to make rebuilding impossible — completely unfit for long-term maintenance. The correct approach is a permanent `venv/` inside this repo itself (excluded from version control via `.gitignore`, but the directory itself stays on disk, independent of any path unrelated to this repo).
 
-PaddlePaddle/paddleocr have three known, already-fixed compatibility issues under a PyInstaller frozen build, all three fixes already written into `packaging/ocr_service.spec` (not assembled from a long CLI flag list — a `.spec` file is required to express the `Tree()` copy needed for issue 3, which plain CLI flags can't do):
+Since switching to `rapidocr_onnxruntime` (see "Why paddleocr Was Replaced With rapidocr_onnxruntime" above), packaging is dramatically simpler: the three paddle-specific compatibility hacks are gone (the custom runtime hook, `collect_data_files("Cython")`, and the `Tree()` copy of paddleocr's source — full history of why they existed is preserved in git history for the old version of this README and `packaging/ocr_service.spec`). `pyinstaller`'s `pyinstaller-hooks-contrib` dependency already ships packaging rules for onnxruntime/opencv/lxml and friends, so the `.spec` file only needs `collect_data_files("rapidocr_onnxruntime")` to pull in the package's bundled `config.yaml` and `models/*.onnx` — no custom runtime hook needed at all.
 
-1. `paddle/base/core.py`'s `set_paddle_lib_path()` finds `paddle/libs` via `site.getsitepackages()`, which doesn't exist in a frozen environment and falls back to `site.USER_SITE` (`None` when frozen), raising a `TypeError` before any real code even runs. Fixed with `packaging/rthook_paddle_libpath.py`, a PyInstaller runtime hook that patches `site.getsitepackages()` to report where `paddle/libs` actually ends up once frozen.
-2. `paddle.utils.cpp_extension` (never used for OCR inference, but imported anyway during paddle's package init) depends on the Cython compiler, and Cython's `Utility/*.cpp` template files aren't collected by PyInstaller as data files by default — the missing file raises `FileNotFoundError` at import time. Fixed in the `.spec` with `collect_data_files("Cython")` — **the build-time venv must have Cython itself installed** (see `requirements-build.txt`), not just the files it produces.
-3. The `paddleocr` package itself loads its own submodules (`ppocr`/`ppstructure`/`tools`) via `sys.path.append` plus dynamic import, invisible to PyInstaller's static analysis. Fixed in the `.spec` with `Tree()`, copying the entire `paddleocr` source directory in as plain data — this needs to know where the build-time venv's site-packages actually lives, passed in via the `PADDLEOCR_SITE_PACKAGES` environment variable (see below), deliberately not hardcoded into the `.spec` so rebuilding on a different machine needs no code changes.
+macOS:
 
 ```bash
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt -r requirements-build.txt
-
-export PADDLEOCR_SITE_PACKAGES="$(pwd)/venv/lib/python3.9/site-packages"
 pyinstaller packaging/ocr_service.spec --noconfirm
 ```
 
-The result lands in `dist/zh-cn-to-tw-ocr-service/`, a fully self-contained directory (including `_internal/`, roughly 850MB) — **it needs no Python and no venv at runtime**, which is the whole point of PyInstaller's onedir mode: the frozen executable runs on a machine with no Python installed at all. The venv above is only needed to *regenerate* this build output — it has nothing to do with what the end user actually receives (what ships inside the `.app`).
+Windows:
+
+```powershell
+python -m venv venv
+venv\Scripts\Activate.ps1
+pip install -r requirements.txt -r requirements-build.txt
+pyinstaller packaging\ocr_service.spec --noconfirm
+```
+
+The result lands in `dist/zh-cn-to-tw-ocr-service/`, a fully self-contained directory — **it needs no Python and no venv at runtime**, which is the whole point of PyInstaller's onedir mode: the frozen executable runs on a machine with no Python installed at all. The venv above is only needed to *regenerate* this build output — it has nothing to do with what the end user actually receives (what ships inside the `.app`/`.exe`). Measured on Windows: about 278MB, far smaller than the old paddleocr-based build (roughly 850MB) — that's not primarily a side effect of dropping Windows 7 support (see `zh-cn-to-tw-windows`'s README), it's mostly just onnxruntime being far leaner than paddlepaddle.
 
 ## Environment Variables
 
