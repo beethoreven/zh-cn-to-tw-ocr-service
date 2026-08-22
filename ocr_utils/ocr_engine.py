@@ -26,19 +26,10 @@ import threading
 import numpy as np
 from PIL import Image
 
+from configs import config
+
 _ocr = None
 _ocr_lock = threading.Lock()
-
-# RapidOCR 套件自帶的 config.yaml 預設 box_thresh=0.5——這是「偵測階段
-# 產生的候選文字框，信心分數要多高才算數」的門檻，不是辨識信心。實測
-# 撞到真實案例：一份劇本裡有兩整行文字（每行都清清楚楚、周圍像素統計
-# 跟其他正常辨識出來的行沒有差異、DPI 150~400 全部一樣）在偵測階段完全
-# 沒有產生候選框，整行憑空消失，沒有任何錯誤或警告——因為候選框的信心
-# 分數卡在 0.3~0.5 之間，被這個門檻擋掉丟棄。降到 0.3（其底層 DBNet
-# 熱力圖本身用的 thresh 也是 0.3，見 config.yaml）之後這兩行正確出現，
-# 辨識信心分數 0.998，證明文字本身完全清楚，純粹是偵測門檻設太高。用
-# 同一頁的其他 18 行重新驗證過，降低門檻後沒有多出任何雜訊行。
-_DET_BOX_THRESH = 0.3
 
 
 def preload() -> None:
@@ -69,11 +60,20 @@ def _line_key(item):
     return (top, left)
 
 
-def ocr_page(image: Image.Image) -> str:
-    """辨識單一頁面圖片，回傳依閱讀順序組合的文字（保留原始簡體，尚未轉繁）。"""
+def ocr_page(image: Image.Image, box_thresh: float | None = None) -> str:
+    """辨識單一頁面圖片，回傳依閱讀順序組合的文字（保留原始簡體，尚未轉繁）。
+
+    box_thresh 是 RapidOCR 偵測階段候選文字框的信心分數門檻，不是辨識
+    信心；沒有指定就用 config.OCR_DET_BOX_THRESH_DEFAULT（見該處的說明：
+    這個門檻設太高會讓清楚可辨的文字整行憑空消失，且沒有任何錯誤或警告）。
+    開放給前端「OCR門檻值」下拉選單調整，呼叫端是 app.py 的
+    _run_local_ocr_job。"""
+    if box_thresh is None:
+        box_thresh = config.OCR_DET_BOX_THRESH_DEFAULT
+
     ocr = _get_ocr()
     with _ocr_lock:
-        result, _elapse = ocr(np.array(image), box_thresh=_DET_BOX_THRESH)
+        result, _elapse = ocr(np.array(image), box_thresh=box_thresh)
 
     if not result:
         return ""

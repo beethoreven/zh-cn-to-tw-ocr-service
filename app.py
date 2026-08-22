@@ -121,7 +121,7 @@ def health():
     return jsonify({"status": "ok"})
 
 
-def _run_local_ocr_job(job_id: str, pdf_path: str, dpi: int, detect_cover: bool) -> None:
+def _run_local_ocr_job(job_id: str, pdf_path: str, dpi: int, detect_cover: bool, box_thresh: float) -> None:
     """在背景執行緒跑：封面偵測（可選）+ 逐頁 OCR，每處理完一頁就更新
     _ocr_jobs[job_id] 的進度，供 /ocr/pdf/status/<job_id> 輪詢讀取。邏輯跟
     zh-cn-to-tw-backend/pipeline/orchestrator.py 的 run_ocr_stage 對應。"""
@@ -195,10 +195,11 @@ def _run_local_ocr_job(job_id: str, pdf_path: str, dpi: int, detect_cover: bool)
         preload()
         log("辨識模型載入完成")
         _update_job(job_id, phase="ocr")
+        log(f"OCR 門檻值：{box_thresh}")
 
         pages: list[str] = []
         for image in page_images:
-            pages.append(ocr_page(image))
+            pages.append(ocr_page(image, box_thresh=box_thresh))
             _update_job(job_id, current_page=len(pages))
 
         _update_job(job_id, status="done", pages=pages, finished_at=time.time())
@@ -237,6 +238,13 @@ def ocr_pdf_start():
         else detect_cover_raw.lower() in ("true", "1", "on")
     )
 
+    try:
+        box_thresh = float(request.form.get("box_thresh") or config.OCR_DET_BOX_THRESH_DEFAULT)
+    except (TypeError, ValueError):
+        return jsonify({"error": "box_thresh 必須是數字"}), 400
+    if not (0 < box_thresh <= 1):
+        return jsonify({"error": "box_thresh 必須介於 0（不含）到 1（含）之間"}), 400
+
     fd, pdf_path = tempfile.mkstemp(suffix=".pdf")
     os.close(fd)
     file.save(pdf_path)
@@ -259,7 +267,7 @@ def ocr_pdf_start():
         }
     threading.Thread(
         target=_run_local_ocr_job,
-        args=(job_id, pdf_path, dpi, detect_cover),
+        args=(job_id, pdf_path, dpi, detect_cover, box_thresh),
         daemon=True,
     ).start()
     return jsonify({"job_id": job_id}), 202

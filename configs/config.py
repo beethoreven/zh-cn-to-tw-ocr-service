@@ -24,6 +24,16 @@ IDLE_TIMEOUT_MINUTES = float(os.environ.get("OCR_SERVICE_IDLE_TIMEOUT_MINUTES", 
 
 PDF_RENDER_DPI = int(os.environ.get("PDF_RENDER_DPI", "200"))
 
+# RapidOCR 偵測階段候選文字框的信心分數門檻（不是辨識信心）。套件自帶
+# config.yaml 預設 0.5，實測撞到真實案例：一份劇本裡有兩整行清清楚楚的
+# 文字，候選框信心分數卡在 0.3~0.5 之間，被 0.5 這個門檻擋掉、整行憑空
+# 消失，沒有任何錯誤或警告；辨識信心分數其實是 0.998，證明文字本身完全
+# 清楚，純粹是偵測門檻設太高。降到 0.3 後正確出現，同一頁其他行重新
+# 驗證過沒有因此多出雜訊行。開放成前端「OCR門檻值」下拉選單可調整
+# （越低越不會漏字，但抓到雜訊的風險也越高，見 ocr_utils/ocr_engine.py
+# 的 ocr_page 呼叫端），這裡只是使用者沒有明確帶值時的預設。
+OCR_DET_BOX_THRESH_DEFAULT = float(os.environ.get("OCR_DET_BOX_THRESH_DEFAULT", "0.3"))
+
 COVER_DETECT_DEFAULT = os.environ.get("COVER_DETECT_DEFAULT", "true").lower() == "true"
 COVER_DETECT_DARK_RATIO_THRESHOLD = float(os.environ.get("COVER_DETECT_DARK_RATIO_THRESHOLD", "0.35"))
 COVER_DETECT_SATURATION_THRESHOLD = float(os.environ.get("COVER_DETECT_SATURATION_THRESHOLD", "20"))
