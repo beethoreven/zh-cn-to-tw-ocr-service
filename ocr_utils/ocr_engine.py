@@ -21,6 +21,15 @@ PP-OCRv4 轉存成 ONNX 格式），辨識品質理論上跟原本 paddleocr 一
 問題。
 """
 
+# 這一行是必要的，不是慣例性的樣板：ocr_page 的簽章用了 `float | None`
+# 這種 PEP 604 寫法，而 PEP 604 在型別註解裡直接求值需要 Python 3.10+。
+# 這支服務打包用的環境是 Python 3.9（見 README 的 PyInstaller 章節），
+# 沒有這行的話 import 階段就會 TypeError: unsupported operand type(s)
+# for |: 'type' and 'NoneType' 整支服務起不來——而且是打包成執行檔之後
+# 才會炸（開發機如果剛好是 3.10+ 就完全看不出問題）。同 repo 的 app.py、
+# pdf_to_images.py、cover_detect.py 都有這行，這支是後來加參數時漏掉的。
+from __future__ import annotations
+
 import threading
 
 import numpy as np
