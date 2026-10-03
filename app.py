@@ -25,7 +25,7 @@ from flask_cors import CORS
 from configs import config
 from ocr_utils.cover_detect import evaluate_cover_page
 from ocr_utils.ocr_engine import ocr_page, preload
-from ocr_utils.pdf_to_images import get_pdf_page_count, render_pdf_pages
+from ocr_utils.pdf_to_images import get_pdf_page_count, render_pdf_pages, split_left_right_pages
 
 app = Flask(__name__)
 
@@ -121,10 +121,12 @@ def health():
     return jsonify({"status": "ok"})
 
 
-def _run_local_ocr_job(job_id: str, pdf_path: str, dpi: int, detect_cover: bool, box_thresh: float) -> None:
+def _run_local_ocr_job(
+    job_id: str, pdf_path: str, dpi: int, detect_cover: bool, split_left_right: bool, box_thresh: float
+) -> None:
     """在背景執行緒跑：封面偵測（可選）+ 逐頁 OCR，每處理完一頁就更新
-    _ocr_jobs[job_id] 的進度，供 /ocr/pdf/status/<job_id> 輪詢讀取。邏輯跟
-    zh-cn-to-tw-backend/pipeline/orchestrator.py 的 run_ocr_stage 對應。"""
+    _ocr_jobs[job_id] 的進度，供 /ocr/pdf/status/<job_id> 輪詢讀取。10.15 分流
+    的 Swift 版（zh-cn-to-tw-mac 的 VisionOCRManager.swift）步驟順序跟這裡一致。"""
     try:
         logs: list[str] = []
 
@@ -159,11 +161,8 @@ def _run_local_ocr_job(job_id: str, pdf_path: str, dpi: int, detect_cover: bool,
                     config.COVER_DETECT_SATURATION_THRESHOLD,
                     config.COVER_DETECT_RELATIVE_MARGIN,
                 )
-                # 跟 zh-cn-to-tw-backend/pipeline/orchestrator.py 的
-                # 對應段落用同一套詳細格式（不管判定結果如何都記下算出
-                # 來的數值），不是只給一個「排除了/沒排除」的黑盒結論——
-                # 兩邊本來就是同一個 evaluate_cover_page，log 的詳細程度
-                # 沒理由不一致。
+                # 不管判定結果如何都記下算出來的數值，不是只給一個
+                # 「排除了/沒排除」的黑盒結論——誤判時才看得出差在哪個門檻。
                 log(
                     f"封面偵測：首頁墨水覆蓋率={result.dark_ratio:.2f}、"
                     f"飽和度={result.saturation:.1f}"
@@ -184,6 +183,13 @@ def _run_local_ocr_job(job_id: str, pdf_path: str, dpi: int, detect_cover: bool,
             except Exception as exc:  # noqa: BLE001
                 log(f"封面偵測發生錯誤：{exc}，跳過偵測，正常處理全部頁面")
             page_images = itertools.chain(lookahead, page_images)
+
+        # 刻意排在封面偵測之後：封面偵測比對的是原始的第 1、2 張，要先決定
+        # 整張封面拿不拿掉，剩下的才切成左右兩頁。
+        if split_left_right:
+            log(f"「切割左右頁格式」已開啟，{total_pages} 張將切割成 {total_pages * 2} 頁")
+            page_images = split_left_right_pages(page_images)
+            total_pages *= 2
 
         _update_job(job_id, total_pages=total_pages)
 
@@ -238,6 +244,13 @@ def ocr_pdf_start():
         else detect_cover_raw.lower() in ("true", "1", "on")
     )
 
+    split_left_right_raw = request.form.get("split_left_right")
+    split_left_right = (
+        config.SPLIT_LEFT_RIGHT_DEFAULT
+        if split_left_right_raw is None
+        else split_left_right_raw.lower() in ("true", "1", "on")
+    )
+
     try:
         box_thresh = float(request.form.get("box_thresh") or config.OCR_DET_BOX_THRESH_DEFAULT)
     except (TypeError, ValueError):
@@ -267,7 +280,7 @@ def ocr_pdf_start():
         }
     threading.Thread(
         target=_run_local_ocr_job,
-        args=(job_id, pdf_path, dpi, detect_cover, box_thresh),
+        args=(job_id, pdf_path, dpi, detect_cover, split_left_right, box_thresh),
         daemon=True,
     ).start()
     return jsonify({"job_id": job_id}), 202

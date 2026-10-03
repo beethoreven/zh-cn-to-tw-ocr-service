@@ -30,6 +30,17 @@ PaddleOCR 的模型不是 process 啟動時就載入，是第一次真的呼叫�
 
 解法是把模型載入拉成一個明確的步驟，job 狀態多一個 `phase` 欄位（`preparing` → `loading_model` → `ocr`），前端依這個欄位顯示對應的文字，不是等第一頁跑完才有反應。
 
+### 頁面前處理：封面偵測與切割左右頁
+
+OCR 之前，頁面圖片依序經過兩個可選步驟，由前端兩個開關控制。10.15 分流的 `zh-cn-to-tw-mac/Legacy/.../VisionOCRManager.swift` 用同樣的順序、同樣的算法實作。
+
+1. **偵測首頁是否為封面**（預設開）：拿第 1、2 頁比墨水覆蓋率跟飽和度（`ocr_utils/cover_detect.py`），判定為封面就拿掉第 1 頁。
+2. **切割左右頁格式**（預設關，2026-10-03 新增）：有些劇本是把攤開的兩頁掃成一張橫式圖（例如 595×433），左右各有完整的頁首與頁碼，中間是空白的裝訂邊。開關打開就把每一張從正中間切開，左半是前一頁、右半是後一頁（4 張橫式 → 8 頁直式），再進 OCR（`ocr_utils/pdf_to_images.py` 的 `split_left_right_pages`）。
+
+切割**刻意不做任何偵測**。一開始評估過用「橫式長寬比 + 中間有空白帶 + 左右兩半都有內容」自動判斷，但實測兩個問題：一般直式劇本的頁面也可能剛好中間有一條空白（一份 24 頁的劇本裡，有 10 頁的中央有寬度 ≥1.5% 的空白帶），而同一份左右頁檔案裡也會有半邊幾乎全白的頁面（例如只有一個章節標題），逐頁判斷會漏切。最後決定由使用者自己判斷檔案格式，開關打開就整份切——所以預設一定要關，一般直式劇本被誤切的話，每一頁的文字都會從中間斷掉。切點固定在 50%：範例檔的中縫落在寬度 45%–55% 之間，正中間一定是空白處。
+
+順序是先封面、後切割，因為封面偵測比對的是原始的第 1、2 張。已知的副作用：左右頁格式的檔案裡，如果第 2 張剛好有半邊幾乎全白，它的墨水量會偏低，第 1 張就可能因為相對門檻（1.5 倍）被誤判成封面拿掉——範例檔就撞到這個情況，遇到時要關掉封面偵測。
+
 ### 服務生命週期：用到才開、用完就關
 
 這支服務本身不決定自己什麼時候啟動/關閉——完全由桌面殼跟網頁前端控制（見 `zh-cn-to-tw-mac`/`zh-cn-to-tw-web` README 的完整說明）。這支服務自己只保留兩個保險：
@@ -126,7 +137,16 @@ pyinstaller packaging\ocr_service.spec --noconfirm
 |---|---|
 | `OCR_SERVICE_PORT` | 監聽的 port，沒設定就讓系統配一個空的 |
 | `OCR_SERVICE_TOKEN` | `/ocr/pdf/start` 要求的驗證 token，沒設定就不驗證（本機開發用） |
-| `OCR_SERVICE_IDLE_TIMEOUT_MINUTES` | 閒置多久自我關閉（沒有 job 在跑才算） |
+| `OCR_SERVICE_IDLE_TIMEOUT_MINUTES` | 閒置多久自我關閉，單位分鐘（沒有 job 在跑才算），預設 30 |
+| `PDF_RENDER_DPI` | 請求沒帶 `dpi` 時，PDF 轉圖片的解析度，預設 200 |
+| `OCR_DET_BOX_THRESH_DEFAULT` | 請求沒帶 `box_thresh` 時的偵測框門檻，預設 0.3（為什麼不是套件預設的 0.5，見 `configs/config.py` 的說明） |
+| `COVER_DETECT_DEFAULT` | 請求沒帶 `detect_cover` 時要不要做封面偵測，預設 `true` |
+| `COVER_DETECT_DARK_RATIO_THRESHOLD` | 封面偵測：首頁墨水覆蓋率超過這個值就判定為封面，預設 0.35 |
+| `COVER_DETECT_SATURATION_THRESHOLD` | 封面偵測：首頁平均飽和度（0–255）超過這個值就判定為封面，預設 20 |
+| `COVER_DETECT_RELATIVE_MARGIN` | 封面偵測：首頁的墨水覆蓋率或飽和度達到第 2 頁的幾倍就判定為封面，預設 1.5 |
+| `SPLIT_LEFT_RIGHT_DEFAULT` | 請求沒帶 `split_left_right` 時要不要切割左右頁，預設 `false`（見「頁面前處理」） |
+
+**這些變數只在本機手動執行服務時有作用。** 桌面殼啟動這支服務時，整個環境變數只傳 `OCR_SERVICE_TOKEN` 一個（`OCRServiceManager.swift` 的 `process.environment`），打包後的 App 裡其他變數一律是預設值。另外前端每次都會明確帶 `dpi`、`detect_cover`、`split_left_right`、`box_thresh`，名字帶 `_DEFAULT` 的那幾個只在請求沒帶對應欄位時（例如手動用 curl 測試）才會生效。
 
 ---
 
@@ -159,6 +179,17 @@ Originally a single `POST /ocr/pdf` request that didn't respond until the entire
 PaddleOCR's model isn't loaded at process startup — it loads the first time recognition is actually called, which measures at around 25 seconds (varies a lot by machine) and pulls memory from 26MB to 393MB. Left alone, those 25 seconds hide inside "recognizing page one," so what the frontend's polling sees is "page 0/N" frozen for 25 seconds — indistinguishable from a hang, especially now that the service starts on demand (see below) and pays this cost fresh on every single upload, making it even easier to mistake for a failed startup.
 
 The fix was pulling model loading into its own explicit step: the job state gained a `phase` field (`preparing` → `loading_model` → `ocr`), and the frontend shows text matching the actual phase instead of waiting for page one to finish before showing anything.
+
+### Page Pre-processing: Cover Detection and Left/Right Page Splitting
+
+Before OCR, page images go through two optional steps in order, controlled by two switches in the frontend. The 10.15 tier's `zh-cn-to-tw-mac/Legacy/.../VisionOCRManager.swift` implements the same order and the same algorithms.
+
+1. **Detect whether the first page is a cover** (on by default): compares ink coverage and saturation between pages 1 and 2 (`ocr_utils/cover_detect.py`), and drops page 1 if it's judged a cover.
+2. **Split left/right page format** (off by default, added 2026-10-03): some scripts are scanned as an open spread — two pages side by side on one landscape image (e.g. 595×433), each half with its own full header and page number, and a blank binding gutter in the middle. With the switch on, every image is cut down the exact middle, the left half becoming the earlier page and the right half the later one (4 landscape images → 8 portrait pages), before OCR (`split_left_right_pages` in `ocr_utils/pdf_to_images.py`).
+
+The split **deliberately does no detection**. Auto-detecting it via "landscape aspect ratio + a blank vertical band in the middle + content on both halves" was evaluated first, but testing found two problems: ordinary portrait pages can also happen to have a blank band down the middle (in one 24-page script, 10 pages had a central blank band ≥1.5% of the width), and a genuine spread file can contain a page whose one half is almost entirely blank (e.g. just a chapter title), so per-page detection would miss splits. The decision was to let the user judge the file's format and split the whole document whenever the switch is on — which is why it must default to off: an ordinary portrait script split by mistake gets every page's text cut in half. The cut is fixed at 50%: the sample file's gutter sits between 45% and 55% of the width, so the exact middle is always blank.
+
+Cover detection runs first, then the split, because cover detection compares the original first two images. A known side effect: in a spread-format file, if the second image happens to have one nearly-blank half, its ink coverage comes out low, and the first image can then be misjudged as a cover (via the 1.5× relative threshold) and dropped — the sample file hit exactly this; when it happens, turn cover detection off.
 
 ### Service Lifecycle: Start on Use, Stop When Done
 
@@ -256,4 +287,13 @@ The result lands in `dist/zh-cn-to-tw-ocr-service/`, a fully self-contained dire
 |---|---|
 | `OCR_SERVICE_PORT` | Port to listen on; unset lets the OS assign a free one |
 | `OCR_SERVICE_TOKEN` | Token required by `/ocr/pdf/start`; unset means no verification (for local dev) |
-| `OCR_SERVICE_IDLE_TIMEOUT_MINUTES` | How long idle (with no job running) before self-shutdown |
+| `OCR_SERVICE_IDLE_TIMEOUT_MINUTES` | How long idle, in minutes (with no job running), before self-shutdown; default 30 |
+| `PDF_RENDER_DPI` | PDF-to-image resolution when a request doesn't send `dpi`; default 200 |
+| `OCR_DET_BOX_THRESH_DEFAULT` | Detection-box threshold when a request doesn't send `box_thresh`; default 0.3 (for why it isn't the package's own 0.5, see the comment in `configs/config.py`) |
+| `COVER_DETECT_DEFAULT` | Whether to run cover detection when a request doesn't send `detect_cover`; default `true` |
+| `COVER_DETECT_DARK_RATIO_THRESHOLD` | Cover detection: page 1 is judged a cover if its ink coverage exceeds this; default 0.35 |
+| `COVER_DETECT_SATURATION_THRESHOLD` | Cover detection: page 1 is judged a cover if its mean saturation (0–255) exceeds this; default 20 |
+| `COVER_DETECT_RELATIVE_MARGIN` | Cover detection: page 1 is judged a cover if its ink coverage or saturation reaches this multiple of page 2's; default 1.5 |
+| `SPLIT_LEFT_RIGHT_DEFAULT` | Whether to split left/right pages when a request doesn't send `split_left_right`; default `false` (see "Page Pre-processing") |
+
+**These variables only take effect when running the service manually.** When the desktop shell launches this service, the only environment variable it passes is `OCR_SERVICE_TOKEN` (`process.environment` in `OCRServiceManager.swift`), so inside the packaged app every other variable stays at its default. Also, the frontend always sends `dpi`, `detect_cover`, `split_left_right`, and `box_thresh` explicitly; the `_DEFAULT` ones only apply when a request omits the matching field (e.g. manual testing with curl).

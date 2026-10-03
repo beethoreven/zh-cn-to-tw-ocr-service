@@ -38,3 +38,7 @@ COVER_DETECT_DEFAULT = os.environ.get("COVER_DETECT_DEFAULT", "true").lower() ==
 COVER_DETECT_DARK_RATIO_THRESHOLD = float(os.environ.get("COVER_DETECT_DARK_RATIO_THRESHOLD", "0.35"))
 COVER_DETECT_SATURATION_THRESHOLD = float(os.environ.get("COVER_DETECT_SATURATION_THRESHOLD", "20"))
 COVER_DETECT_RELATIVE_MARGIN = float(os.environ.get("COVER_DETECT_RELATIVE_MARGIN", "1.5"))
+
+# 「切割左右頁格式」：不做偵測、開了就整份切，所以預設一定要關——一般直式
+# 劇本被誤切成兩半會讓每一頁的文字都斷掉。
+SPLIT_LEFT_RIGHT_DEFAULT = os.environ.get("SPLIT_LEFT_RIGHT_DEFAULT", "false").lower() == "true"

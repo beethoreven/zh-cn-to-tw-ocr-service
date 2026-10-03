@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 
 import fitz  # PyMuPDF
 from PIL import Image
@@ -36,3 +36,14 @@ def render_pdf_pages(pdf_path: str, dpi: int | None = None) -> Iterator[Image.Im
             mode = "RGB" if pix.n < 4 else "RGBA"
             img = Image.frombytes(mode, (pix.width, pix.height), pix.samples)
             yield img.convert("RGB")
+
+
+def split_left_right_pages(images: Iterable[Image.Image]) -> Iterator[Image.Image]:
+    """把每張左右頁格式（一張掃描裡並排兩頁）的圖從正中間切開，依序
+    yield 左半、右半——左頁是前一頁、右頁是後一頁。不做任何偵測，呼叫
+    端（使用者開了「切割左右頁格式」開關）負責保證這份檔案真的是這種
+    格式。維持逐張處理的產生器形式，理由同 render_pdf_pages。"""
+    for img in images:
+        mid = img.width // 2
+        yield img.crop((0, 0, mid, img.height))
+        yield img.crop((mid, 0, img.width, img.height))
