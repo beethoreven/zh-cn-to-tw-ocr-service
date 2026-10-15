@@ -29,21 +29,29 @@ from ocr_utils.pdf_to_images import get_pdf_page_count, render_pdf_pages, split_
 
 app = Flask(__name__)
 
-# 桌面殼現在用 file:// 直接內嵌網頁資源載入（見 desktop_app_plan 記憶），
-# 瀏覽器對 file:// 頁面發出的跨來源請求，Origin header 的值是字面上的
-# "null"，要明確放行，不然桌面版打本機這支 OCR service 一律會被 CORS
-# 擋下來（實測抓到：桌面版讀 http://127.0.0.1:<ocr-port>/ocr/pdf/start
-# 時 "Origin null is not allowed by Access-Control-Allow-Origin"）。
-# 跟 zh-cn-to-tw-backend/app.py 的 CORS 設定保持一致。
+# 桌面殼把網頁資源包在 App 裡直接載入，不同載入方式送出的 Origin 不一樣，
+# 都要明確放行，不然桌面版打本機這支 OCR service 一律會被 CORS 擋下來：
+# - "https://zh-cn-to-tw.example"：2.0 起的 Windows 版（WebView2 虛擬主機
+#   對應，見 zh-cn-to-tw-windows 的 MainWindow.xaml.cs）。
+# - "zhcntotw://app"：2.0 起的 Mac 版（自訂 scheme）。
+# - "null"：用 file:// 載入的桌面版。瀏覽器對 file:// 頁面發出的跨來源
+#   請求，Origin header 的值是字面上的 "null"（實測抓到：桌面版讀
+#   http://127.0.0.1:<ocr-port>/ocr/pdf/start 時 "Origin null is not
+#   allowed by Access-Control-Allow-Origin"）。這支服務跟著 App 一起打包，
+#   但 Mac 版改成自訂 scheme 之前，打包進去的還是 file:// 版的殼，所以先留著。
+# 跟 zh-cn-to-tw-backend/app.py 的 CORS 設定保持一致——兩邊都要改，
+# 只改一邊就會像上面那次一樣，後端通了、本機 OCR 卻被擋。
 # 本機開發用（任意 port 的 localhost/127.0.0.1）也一併放行——桌面殼
 # 測試時常用 WEB_BASE_URL_OVERRIDE 指到本機的 http.server，origin 是
-# http://localhost:<port>，不是 file://，也需要放行。
+# http://localhost:<port>，也需要放行。
 CORS(
     app,
     origins=[
         "https://beethoreven.github.io",
         r"http://localhost:\d+",
         r"http://127\.0\.0\.1:\d+",
+        "https://zh-cn-to-tw.example",
+        "zhcntotw://app",
         "null",
     ],
     allow_headers=["Content-Type", "X-OCR-Token"],

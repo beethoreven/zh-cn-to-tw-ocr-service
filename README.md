@@ -52,7 +52,13 @@ OCR 之前，頁面圖片依序經過兩個可選步驟，由前端兩個開關�
 
 `/ocr/pdf/start` 要求呼叫端在 `X-OCR-Token` header 帶出殼啟動這支服務時給的隨機 token。同一台機器上任何其他本機程式或頁面理論上都碰得到 localhost 的這個 port，用一個殼啟動時才產生、只有殼自己知道的隨機值來防止冒充呼叫。
 
-CORS 放行清單裡有一條 `"null"`——桌面殼用 `file://` 載入頁面後，瀏覽器對跨來源請求送出的 `Origin` header 字面上就是 `"null"`，不放行的話桌面版打這支服務的每個請求都會被瀏覽器 CORS 擋下來（實測撞過：`Origin null is not allowed by Access-Control-Allow-Origin`）。
+CORS 放行清單要涵蓋桌面殼載入頁面的每一種方式，因為瀏覽器對跨來源請求送出的 `Origin` header 跟著載入方式走，漏了任何一種，桌面版打這支服務的每個請求都會被瀏覽器 CORS 擋下來：
+
+- `"https://zh-cn-to-tw.example"`：2.0 起的 Windows 版，殼用 WebView2 虛擬主機對應載入頁面（見 `zh-cn-to-tw-windows` README）。
+- `"zhcntotw://app"`：2.0 起的 Mac 版，殼用自訂 scheme 載入頁面。
+- `"null"`：用 `file://` 載入頁面的桌面版，`Origin` header 字面上就是 `"null"`（實測撞過：`Origin null is not allowed by Access-Control-Allow-Origin`）。這支服務跟著 App 一起打包，Mac 版改成自訂 scheme 之前，打包進去的殼還是 `file://` 版，所以先留著。
+
+這份清單要跟 `zh-cn-to-tw-backend` 的 CORS 設定保持一致，兩邊都要改——上面那次實測撞到的就是只改了後端、漏了這支服務。
 
 ### 為什麼從 paddleocr 換成 rapidocr_onnxruntime
 
@@ -202,7 +208,13 @@ This service doesn't decide its own start/stop timing at all — that's entirely
 
 `/ocr/pdf/start` requires the caller to supply, in the `X-OCR-Token` header, the random token the shell generated when it launched this service. Any other local program or page on the same machine could in theory reach this localhost port, so a value that's randomly generated per-launch and known only to the shell itself prevents impersonated calls.
 
-The CORS allowlist includes a literal `"null"` entry — once the desktop shell loads its page via `file://`, the browser's `Origin` header on cross-origin requests is the literal string `"null"`; without allowing it, every desktop-mode call to this service gets blocked by CORS (confirmed by reproduction: `Origin null is not allowed by Access-Control-Allow-Origin`).
+The CORS allowlist must cover every way a desktop shell loads its page, because the browser's `Origin` header on cross-origin requests follows the loading method; miss any one of them and every desktop-mode call to this service gets blocked by CORS:
+
+- `"https://zh-cn-to-tw.example"`: the Windows build from 2.0, whose shell loads the page through a WebView2 virtual host mapping (see the `zh-cn-to-tw-windows` README).
+- `"zhcntotw://app"`: the Mac build from 2.0, whose shell loads the page through a custom scheme.
+- `"null"`: desktop builds that load the page via `file://`, where the `Origin` header is the literal string `"null"` (confirmed by reproduction: `Origin null is not allowed by Access-Control-Allow-Origin`). This service is bundled with the app, and until the Mac build switches to its custom scheme the shell bundled alongside it is still the `file://` one, so this entry stays for now.
+
+This list must stay in sync with `zh-cn-to-tw-backend`'s CORS settings, and both must be changed together — the reproduction above happened precisely because only the backend was updated and this service was missed.
 
 ### Why paddleocr Was Replaced With rapidocr_onnxruntime
 
