@@ -1,3 +1,15 @@
+# 版本為什麼停在這裡（2026-11-11 查 PyPI）：
+# - 這支服務被 PyInstaller 打包進 Mac 11+ 那包，執行檔必須在 macOS 11
+#   與 Intel Mac 上跑。onnxruntime（rapidocr_onnxruntime 的推論引擎）
+#   1.19.2 是最後一版有 macosx_11_0_universal2 wheel 的；1.20～1.22 要
+#   macOS 13，1.23 起只剩 macOS 13 x86_64，1.24 起只有 macOS 14 arm64。
+#   升上去等於 macOS 11、12 與大部分 Intel Mac 的使用者 Stage 1 直接壞掉。
+# - rapidocr_onnxruntime 1.4.4 本身要求 Python < 3.13。
+# - 打包用的 Python 目前是系統內建的 3.9（已停止維護）。onnxruntime
+#   1.19.2 支援到 3.12，所以 Python 可以升到 3.12，但打包用的直譯器本身
+#   也要能在 macOS 11 跑（例如 python.org 的 universal2 安裝檔；pyenv 在
+#   新系統上自己編的 minos 會跟著開發機，不能用）。這件事要連同 Windows
+#   那包一起換、重新驗證，不在發布前臨時做。
 Flask==3.0.3
 Flask-Cors==5.0.0
 PyMuPDF==1.24.11
