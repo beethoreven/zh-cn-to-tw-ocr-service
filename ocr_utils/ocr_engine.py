@@ -82,7 +82,14 @@ def ocr_page(image: Image.Image, box_thresh: float | None = None) -> str:
 
     ocr = _get_ocr()
     with _ocr_lock:
-        result, _elapse = ocr(np.array(image), box_thresh=box_thresh)
+        # use_cls=False：關掉文字方向分類器（RapidOCR 預設開著）。它會把某些
+        # 行（常見於同一行粗體、細體混排）誤判成上下顛倒，轉 180 度後辨識
+        # 失敗、信心分數很低，再被套件內建的 text_score 0.5 濾掉，整行憑空
+        # 消失，沒有任何錯誤或警告。2026-11-08 實測一份 24 頁的劇本（200
+        # dpi）：開著 654 行、關掉 660 行，漏掉的都是完整的劇情句子；反過來
+        # 「只有開著才讀得到」的行一行都沒有。劇本都是正向橫排，用不到方向
+        # 判斷。
+        result, _elapse = ocr(np.array(image), box_thresh=box_thresh, use_cls=False)
 
     if not result:
         return ""
